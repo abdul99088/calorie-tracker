@@ -3,24 +3,20 @@ import { createClient } from '@supabase/supabase-js';
 import { Chart, registerables } from 'chart.js';
 Chart.register(...registerables);
 
-// Initialize Supabase Client securely
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-const GOALS = { cal: 2000, pro: 150, carb: 250, fat: 65 };
 const WEEK_DATA = [1420, 1800, 1650, 2100, 1950, 1380];
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export default function CalAIClone() {
-  // Authentication State
   const [user, setUser] = useState(null);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
-  const [authMode, setAuthMode] = useState('login'); // 'login' or 'signup'
+  const [authMode, setAuthMode] = useState('login');
 
-  // Application State
   const [tab, setTab] = useState('diary');
   const [loading, setLoading] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
@@ -28,35 +24,60 @@ export default function CalAIClone() {
   const [historyLogs, setHistoryLogs] = useState([]);
   const [mealData, setMealData] = useState({ meal: '', calories: 0, protein: 0, carbs: 0, fat: 0 });
 
-  // Chart References
+  // 👤 DYNAMIC USER PROFILE STATE (Default fallback values)
+  const [profile, setProfile] = useState({
+    gender: 'male',
+    age: 25,
+    weight: 70, // in kg
+    height: 175, // in cm
+    activity: '1.375', // Lightly active multiplier
+  });
+
+  // 📊 DYNAMIC GOAL GENERATOR BASED ON PROFILE STATE
+  const getDynamicGoals = () => {
+    const { gender, age, weight, height, activity } = profile;
+    const w = parseFloat(weight) || 70;
+    const h = parseFloat(height) || 175;
+    const a = parseFloat(age) || 25;
+    const mult = parseFloat(activity) || 1.2;
+
+    // Mifflin-St Jeor Equation
+    let bmr = (10 * w) + (6.25 * h) - (5 * a);
+    bmr = gender === 'male' ? bmr + 5 : bmr - 161;
+    
+    const tdee = Math.round(bmr * mult);
+
+    // Standard Macro Split: 30% Protein, 40% Carbs, 30% Fat
+    return {
+      cal: tdee,
+      pro: Math.round((tdee * 0.30) / 4), // 4 kcal per gram
+      carb: Math.round((tdee * 0.40) / 4),
+      fat: Math.round((tdee * 0.30) / 9),  // 9 kcal per gram
+    };
+  };
+
+  const GOALS = getDynamicGoals();
+
   const weekChartRef = useRef(null);
   const macroChartRef = useRef(null);
   const weekChartInstance = useRef(null);
   const macroChartInstance = useRef(null);
 
-  // Monitor Supabase Authentication State Sessions
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
     });
-
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
     });
-
     return () => subscription.unsubscribe();
   }, []);
 
-  // Fetch log history items specifically for the logged-in user
   useEffect(() => {
-    if (user) {
-      fetchTodayLogs();
-    } else {
-      setHistoryLogs([]);
-    }
+    if (user) fetchTodayLogs();
+    else setHistoryLogs([]);
   }, [user]);
 
-  // Re-trigger visual analytics calculations whenever the user adjusts tabs
   useEffect(() => {
     if (user && tab === 'progress') {
       const timer = setTimeout(() => renderCharts(), 100);
@@ -70,7 +91,7 @@ export default function CalAIClone() {
     const { data, error } = await supabase
       .from('food_logs')
       .select('*')
-      .eq('user_id', user.id) // Secure user containment query isolation
+      .eq('user_id', user.id)
       .gte('created_at', today)
       .order('created_at', { ascending: false });
     
@@ -82,23 +103,15 @@ export default function CalAIClone() {
     e.preventDefault();
     if (!authEmail || !authPassword) return alert("Please fill in all fields");
     setAuthLoading(true);
-
     let error;
     if (authMode === 'signup') {
-      const { error: signUpError } = await supabase.auth.signUp({
-        email: authEmail,
-        password: authPassword,
-      });
+      const { error: signUpError } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
       error = signUpError;
       if (!error) alert("Check your inbox for a registration confirmation link!");
     } else {
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: authEmail,
-        password: authPassword,
-      });
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
       error = signInError;
     }
-
     setAuthLoading(false);
     if (error) alert(error.message);
   };
@@ -155,7 +168,7 @@ export default function CalAIClone() {
     if (!mealData.meal || !user) return;
     setLoading(true);
     const { error } = await supabase.from('food_logs').insert([{
-      user_id: user.id, // Binds current log directly to the account UUID session
+      user_id: user.id,
       meal_name: mealData.meal,
       calories: mealData.calories,
       protein: mealData.protein,
@@ -164,27 +177,15 @@ export default function CalAIClone() {
     }]);
     setLoading(false);
     if (error) { alert('Database error: ' + error.message); return; }
-    
-    // Clear out input components smoothly on successful callback execution
     clearSelectedImage();
     fetchTodayLogs();
   };
 
-  // ❌ DELETE FUNCTION: Removes a meal log from Supabase row entry
   const deleteMeal = async (id) => {
     if (!window.confirm("Are you sure you want to remove this meal?")) return;
-    
-    const { error } = await supabase
-      .from('food_logs')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', user.id); // Guard ensures users can only delete their own data
-
-    if (error) {
-      alert('Failed to delete: ' + error.message);
-    } else {
-      fetchTodayLogs(); // Refresh the calculation totals and list
-    }
+    const { error } = await supabase.from('food_logs').delete().eq('id', id).eq('user_id', user.id);
+    if (error) alert('Failed to delete: ' + error.message);
+    else fetchTodayLogs();
   };
 
   const totals = historyLogs.reduce((a, l) => ({
@@ -243,7 +244,6 @@ export default function CalAIClone() {
     }
   };
 
-  // Micro UI Native CSS Definitions
   const s = {
     app: { maxWidth: 430, margin: '10px auto', background: '#f5f5f5', minHeight: '92vh', fontFamily: 'system-ui, -apple-system, sans-serif', border: '1px solid #e0e0e0', borderRadius: '40px', boxShadow: '0 12px 36px rgba(0,0,0,0.12)', overflowX: 'hidden', position: 'relative' },
     topbar: { background: '#fff', padding: '16px 20px 12px', borderBottom: '0.5px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
@@ -262,6 +262,7 @@ export default function CalAIClone() {
     field: { marginBottom: 12 },
     label: { display: 'block', fontSize: 12, color: '#666', marginBottom: 5 },
     input: { width: '100%', padding: '9px 12px', border: '0.5px solid #ddd', borderRadius: 8, fontSize: 14, boxSizing: 'border-box', background: '#fafafa' },
+    select: { width: '100%', padding: '9px 12px', border: '0.5px solid #ddd', borderRadius: 8, fontSize: 14, boxSizing: 'border-box', background: '#fafafa' },
     grid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
     logBtn: (disabled) => ({ width: '100%', padding: 13, background: disabled ? '#b7eb8f' : '#111', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', marginTop: 12 }),
     logItem: { background: '#fff', border: '0.5px solid #eee', borderRadius: 8, padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
@@ -289,7 +290,6 @@ export default function CalAIClone() {
   const streakDays = ['M','T','W','T','F','S','S'];
   const streakActive = [true,true,true,true,true,true,false];
 
-  /* ------------------- VIEW A: AUTHENTICATION INTERFACE ------------------- */
   if (!user) {
     return (
       <div style={s.app}>
@@ -299,7 +299,6 @@ export default function CalAIClone() {
         <div style={{ padding: '0 24px', textAlign: 'center', marginTop: '20px' }}>
           <h2 style={{ fontSize: '32px', fontWeight: '800', marginBottom: '10px' }}>🥑 Cal AI</h2>
           <p style={{ color: '#666', fontSize: '14px', marginBottom: '30px' }}>Track your macros instantly with AI</p>
-          
           <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
             <input type="email" placeholder="Email Address" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} style={s.input} />
             <input type="password" placeholder="Password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} style={s.input} />
@@ -307,7 +306,6 @@ export default function CalAIClone() {
               {authLoading ? 'Processing...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
             </button>
           </form>
-
           <p onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')} style={{ color: '#007aff', fontSize: '13px', marginTop: '20px', cursor: 'pointer', fontWeight: '600' }}>
             {authMode === 'login' ? "Don't have an account? Sign Up" : 'Already have an account? Log In'}
           </p>
@@ -316,7 +314,6 @@ export default function CalAIClone() {
     );
   }
 
-  /* ------------------- VIEW B: SECURE CORE INTERFACE ------------------- */
   return (
     <div style={s.app}>
       <div style={s.topbar}>
@@ -339,7 +336,6 @@ export default function CalAIClone() {
         ))}
       </div>
 
-      {/* DIARY TAB SUBSECTION */}
       {tab === 'diary' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -367,7 +363,7 @@ export default function CalAIClone() {
                       </div>
                     </div>
                     <div style={{ fontSize: 12, color: '#888' }}>{label}</div>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: '#111' }}>{val}g</div>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: '#111' }}>{val}g / {goal}g</div>
                   </div>
                 ))}
               </div>
@@ -433,19 +429,7 @@ export default function CalAIClone() {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <div style={{ fontSize: 14, fontWeight: 500, color: '#185FA5' }}>{log.calories} kcal</div>
-                    {/* Native Delete Entry Button */}
-                    <button 
-                      onClick={() => deleteMeal(log.id)}
-                      style={{
-                        background: 'none', border: 'none', color: '#ff4d4f', 
-                        cursor: 'pointer', fontSize: '16px', padding: '4px 8px',
-                        borderRadius: '4px', display: 'flex', alignItems: 'center',
-                        justifyContent: 'center'
-                      }}
-                      title="Delete log"
-                    >
-                      🗑️
-                    </button>
+                    <button onClick={() => deleteMeal(log.id)} style={{ background: 'none', border: 'none', color: '#ff4d4f', cursor: 'pointer', fontSize: '16px', padding: '4px 8px' }} title="Delete log">🗑️</button>
                   </div>
                 </div>
               ))}
@@ -454,7 +438,6 @@ export default function CalAIClone() {
         </div>
       )}
 
-      {/* PROGRESS TAB SUBSECTION */}
       {tab === 'progress' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -468,27 +451,55 @@ export default function CalAIClone() {
             <div style={{ position: 'relative', width: 140, height: 140, margin: '0 auto 12px' }}>
               <canvas ref={macroChartRef} role="img" aria-label="Macro donut chart" />
             </div>
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 16, fontSize: 12, color: '#888' }}>
-              {[
-                ['#A32D2D', 'Protein'],
-                ['#534AB7', 'Carbs'],
-                ['#854F0B', 'Fat']
-              ].map(([c, l]) => (
-                <span key={l} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 2, background: c, display: 'inline-block' }} />
-                  {l}
-                </span>
-              ))}
-            </div>
           </div>
         </div>
       )}
 
-      {/* GOALS TAB SUBSECTION */}
+      {/* GOALS TAB SUBSECTION (Dynamic Form Implemented Here) */}
       {tab === 'goals' && (
         <div style={s.section}>
+          {/* 👥 REAL-WORLD PROFILE CONFIGURATOR CARD */}
           <div style={s.card}>
-            <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 14, color: '#111' }}>Daily targets</div>
+            <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 14px 0', color: '#111' }}>🧬 Calculate Your Custom Calorie Target</h3>
+            
+            <div style={s.field}>
+              <label style={s.label}>Biological Gender</label>
+              <select style={s.select} value={profile.gender} onChange={e => setProfile({...profile, gender: e.target.value})}>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+              </select>
+            </div>
+
+            <div style={s.grid2}>
+              <div style={s.field}>
+                <label style={s.label}>Age (years)</label>
+                <input style={s.input} type="number" value={profile.age} onChange={e => setProfile({...profile, age: parseInt(e.target.value) || 0})} />
+              </div>
+              <div style={s.field}>
+                <label style={s.label}>Height (cm)</label>
+                <input style={s.input} type="number" value={profile.height} onChange={e => setProfile({...profile, height: parseInt(e.target.value) || 0})} />
+              </div>
+            </div>
+
+            <div style={s.grid2}>
+              <div style={s.field}>
+                <label style={s.label}>Weight (kg)</label>
+                <input style={s.input} type="number" value={profile.weight} onChange={e => setProfile({...profile, weight: parseInt(e.target.value) || 0})} />
+              </div>
+              <div style={s.field}>
+                <label style={s.label}>Activity Level</label>
+                <select style={s.select} value={profile.activity} onChange={e => setProfile({...profile, activity: e.target.value})}>
+                  <option value="1.2">Sedentary (Little/No Exercise)</option>
+                  <option value="1.375">Lightly Active (1-3 Days/Wk)</option>
+                  <option value="1.55">Moderately Active (3-5 Days/Wk)</option>
+                  <option value="1.725">Very Active (6-7 Days/Wk)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style={s.card}>
+            <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 14, color: '#111' }}>Calculated Targets</div>
             {[
               { label: 'Calories', val: totals.cal, goal: GOALS.cal, unit: 'kcal', color: '#639922' },
               { label: 'Protein', val: totals.pro, goal: GOALS.pro, unit: 'g', color: '#A32D2D' },
@@ -509,12 +520,10 @@ export default function CalAIClone() {
 
           <div style={s.card}>
             <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 4, color: '#111' }}>Streak tracker</div>
-            <div style={{ fontSize: 13, color: '#888', marginBottom: 8 }}>Last 7 days</div>
             <div style={s.streakGrid}>
               {streakDays.map((d, i) => (
                 <div key={i} style={{
-                  aspectRatio: '1', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 11, fontWeight: 500,
+                  aspectRatio: '1', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 500,
                   background: i === 5 ? '#fff' : streakActive[i] ? '#3B6D11' : '#f0f0f0',
                   color: i === 5 ? '#3B6D11' : streakActive[i] ? '#EAF3DE' : '#aaa',
                   border: i === 5 ? '1.5px solid #3B6D11' : 'none'
