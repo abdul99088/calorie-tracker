@@ -170,6 +170,23 @@ export default function CalAIClone() {
     fetchTodayLogs();
   };
 
+  // ❌ DELETE FUNCTION: Removes a meal log from Supabase row entry
+  const deleteMeal = async (id) => {
+    if (!window.confirm("Are you sure you want to remove this meal?")) return;
+    
+    const { error } = await supabase
+      .from('food_logs')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user.id); // Guard ensures users can only delete their own data
+
+    if (error) {
+      alert('Failed to delete: ' + error.message);
+    } else {
+      fetchTodayLogs(); // Refresh the calculation totals and list
+    }
+  };
+
   const totals = historyLogs.reduce((a, l) => ({
     cal: a.cal + l.calories,
     pro: a.pro + l.protein,
@@ -368,7 +385,6 @@ export default function CalAIClone() {
           ) : (
             <div style={{ position: 'relative', marginBottom: 12 }}>
               <img src={imagePreview} alt="Preview" style={{ width: '100%', maxHeight: 180, objectFit: 'cover', borderRadius: 12 }} />
-              {/* Clean absolute contextual layout for the close sign button configuration */}
               <button onClick={clearSelectedImage} style={{
                 position: 'absolute', top: '10px', right: '10px', width: '30px', height: '30px',
                 borderRadius: '50%', background: 'rgba(0,0,0,0.7)', color: '#fff', border: 'none',
@@ -415,7 +431,22 @@ export default function CalAIClone() {
                     <div style={{ fontSize: 14, fontWeight: 500, color: '#111' }}>{log.meal_name}</div>
                     <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>P: {log.protein}g · C: {log.carbs}g · F: {log.fat}g</div>
                   </div>
-                  <div style={{ fontSize: 14, fontWeight: 500, color: '#185FA5' }}>{log.calories} kcal</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: '#185FA5' }}>{log.calories} kcal</div>
+                    {/* Native Delete Entry Button */}
+                    <button 
+                      onClick={() => deleteMeal(log.id)}
+                      style={{
+                        background: 'none', border: 'none', color: '#ff4d4f', 
+                        cursor: 'pointer', fontSize: '16px', padding: '4px 8px',
+                        borderRadius: '4px', display: 'flex', alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                      title="Delete log"
+                    >
+                      🗑️
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
