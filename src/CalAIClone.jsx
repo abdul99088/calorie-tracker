@@ -3,43 +3,109 @@ import { createClient } from '@supabase/supabase-js';
 import { Chart, registerables } from 'chart.js';
 Chart.register(...registerables);
 
+// Initialize Supabase Client securely
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 const GOALS = { cal: 2000, pro: 150, carb: 250, fat: 65 };
-
 const WEEK_DATA = [1420, 1800, 1650, 2100, 1950, 1380];
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export default function CalAIClone() {
+  // Authentication State
+  const [user, setUser] = useState(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'signup'
+
+  // Application State
   const [tab, setTab] = useState('diary');
   const [loading, setLoading] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
   const [base64Data, setBase64Data] = useState(null);
   const [historyLogs, setHistoryLogs] = useState([]);
   const [mealData, setMealData] = useState({ meal: '', calories: 0, protein: 0, carbs: 0, fat: 0 });
+
+  // Chart References
   const weekChartRef = useRef(null);
   const macroChartRef = useRef(null);
   const weekChartInstance = useRef(null);
   const macroChartInstance = useRef(null);
 
-  useEffect(() => { fetchTodayLogs(); }, []);
-
+  // Monitor Supabase Authentication State Sessions
   useEffect(() => {
-    if (tab === 'progress') {
-      setTimeout(() => renderCharts(), 100);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Fetch log history items specifically for the logged-in user
+  useEffect(() => {
+    if (user) {
+      fetchTodayLogs();
+    } else {
+      setHistoryLogs([]);
     }
-  }, [tab, historyLogs]);
+  }, [user]);
+
+  // Re-trigger visual analytics calculations whenever the user adjusts tabs
+  useEffect(() => {
+    if (user && tab === 'progress') {
+      const timer = setTimeout(() => renderCharts(), 100);
+      return () => clearTimeout(timer);
+    }
+  }, [tab, historyLogs, user]);
 
   const fetchTodayLogs = async () => {
+    if (!user) return;
     const today = new Date().toISOString().split('T')[0];
     const { data, error } = await supabase
-      .from('food_logs').select('*')
+      .from('food_logs')
+      .select('*')
+      .eq('user_id', user.id) // Secure user containment query isolation
       .gte('created_at', today)
       .order('created_at', { ascending: false });
+    
     if (error) console.error('Fetch error:', error);
     if (data) setHistoryLogs(data);
+  };
+
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) return alert("Please fill in all fields");
+    setAuthLoading(true);
+
+    let error;
+    if (authMode === 'signup') {
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: authEmail,
+        password: authPassword,
+      });
+      error = signUpError;
+      if (!error) alert("Check your inbox for a registration confirmation link!");
+    } else {
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: authEmail,
+        password: authPassword,
+      });
+      error = signInError;
+    }
+
+    setAuthLoading(false);
+    if (error) alert(error.message);
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setTab('diary');
   };
 
   const handleImageChange = (e) => {
@@ -49,6 +115,12 @@ export default function CalAIClone() {
     const reader = new FileReader();
     reader.onloadend = () => setBase64Data(reader.result.split(',')[1]);
     reader.readAsDataURL(file);
+  };
+
+  const clearSelectedImage = () => {
+    setImagePreview(null);
+    setBase64Data(null);
+    setMealData({ meal: '', calories: 0, protein: 0, carbs: 0, fat: 0 });
   };
 
   const analyzeImage = async () => {
@@ -80,10 +152,10 @@ export default function CalAIClone() {
   };
 
   const logMeal = async () => {
-    if (!mealData.meal) return;
+    if (!mealData.meal || !user) return;
     setLoading(true);
     const { error } = await supabase.from('food_logs').insert([{
-      user_id: '00000000-0000-0000-0000-000000000000',
+      user_id: user.id, // Binds current log directly to the account UUID session
       meal_name: mealData.meal,
       calories: mealData.calories,
       protein: mealData.protein,
@@ -92,9 +164,9 @@ export default function CalAIClone() {
     }]);
     setLoading(false);
     if (error) { alert('Database error: ' + error.message); return; }
-    setMealData({ meal: '', calories: 0, protein: 0, carbs: 0, fat: 0 });
-    setImagePreview(null);
-    setBase64Data(null);
+    
+    // Clear out input components smoothly on successful callback execution
+    clearSelectedImage();
     fetchTodayLogs();
   };
 
@@ -106,12 +178,11 @@ export default function CalAIClone() {
   }), { cal: 0, pro: 0, carb: 0, fat: 0 });
 
   const calPct = Math.min(totals.cal / GOALS.cal, 1);
-  const calCircum = 2 * Math.PI * 68;
-  const proCircum = 2 * Math.PI * 26;
 
   const renderCharts = () => {
     if (weekChartInstance.current) weekChartInstance.current.destroy();
     if (macroChartInstance.current) macroChartInstance.current.destroy();
+    
     if (weekChartRef.current) {
       const weekData = [...WEEK_DATA, totals.cal];
       weekChartInstance.current = new Chart(weekChartRef.current, {
@@ -141,7 +212,7 @@ export default function CalAIClone() {
         data: {
           labels: ['Protein', 'Carbs', 'Fat'],
           datasets: [{
-            data: [totals.pro || 30, totals.carb || 60, totals.fat || 10],
+            data: [totals.pro || 1, totals.carb || 1, totals.fat || 1],
             backgroundColor: ['#A32D2D', '#534AB7', '#854F0B'],
             borderWidth: 0
           }]
@@ -155,26 +226,27 @@ export default function CalAIClone() {
     }
   };
 
+  // Micro UI Native CSS Definitions
   const s = {
-    app: { maxWidth: 430, margin: '0 auto', background: '#f5f5f5', minHeight: '100vh', fontFamily: 'system-ui, sans-serif' },
+    app: { maxWidth: 430, margin: '10px auto', background: '#f5f5f5', minHeight: '92vh', fontFamily: 'system-ui, -apple-system, sans-serif', border: '1px solid #e0e0e0', borderRadius: '40px', boxShadow: '0 12px 36px rgba(0,0,0,0.12)', overflowX: 'hidden', position: 'relative' },
     topbar: { background: '#fff', padding: '16px 20px 12px', borderBottom: '0.5px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
-    topbarTitle: { fontSize: 20, fontWeight: 500, color: '#111' },
-    streakBadge: { display: 'flex', alignItems: 'center', gap: 6, background: '#FFF3E0', borderRadius: 20, padding: '5px 12px' },
-    streakText: { fontSize: 13, fontWeight: 500, color: '#E65100' },
+    topbarTitle: { fontSize: 20, fontWeight: 800, color: '#111' },
+    streakBadge: { display: 'flex', alignItems: 'center', gap: 6, background: '#FFF3E0', borderRadius: 20, padding: '5px 12px', cursor: 'pointer' },
+    streakText: { fontSize: 11, fontWeight: 600, color: '#E65100' },
     tabs: { display: 'flex', gap: 8, padding: '12px 16px', background: '#f5f5f5' },
     tab: (active) => ({ flex: 1, padding: '8px 0', textAlign: 'center', fontSize: 13, fontWeight: 500, borderRadius: 8, border: '0.5px solid #ddd', cursor: 'pointer', background: active ? '#111' : '#fff', color: active ? '#fff' : '#666' }),
     section: { padding: '0 16px' },
     card: { background: '#fff', borderRadius: 12, border: '0.5px solid #eee', padding: 16, marginBottom: 12 },
-    calHero: { textAlign: 'center', padding: '20px 16px' },
+    calHero: { textAlign: 'center', padding: '10px 16px' },
     macroRings: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginTop: 16 },
     macroItem: { textAlign: 'center' },
     uploadCard: { border: '1px dashed #ccc', background: '#fafafa', borderRadius: 12, padding: 20, textAlign: 'center', cursor: 'pointer', marginBottom: 12 },
-    analyzeBtn: (show) => ({ width: '100%', padding: 13, background: '#111', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: 'pointer', display: show ? 'block' : 'none', marginBottom: 12 }),
+    analyzeBtn: (show) => ({ width: '100%', padding: 13, background: '#52c41a', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 700, cursor: 'pointer', display: show ? 'block' : 'none', marginBottom: 12 }),
     field: { marginBottom: 12 },
     label: { display: 'block', fontSize: 12, color: '#666', marginBottom: 5 },
-    input: { width: '100%', padding: '9px 12px', border: '0.5px solid #ddd', borderRadius: 8, fontSize: 14, boxSizing: 'border-box' },
+    input: { width: '100%', padding: '9px 12px', border: '0.5px solid #ddd', borderRadius: 8, fontSize: 14, boxSizing: 'border-box', background: '#fafafa' },
     grid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
-    logBtn: (disabled) => ({ width: '100%', padding: 13, background: disabled ? '#b7eb8f' : '#3B6D11', color: '#EAF3DE', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: disabled ? 'not-allowed' : 'pointer', marginTop: 12 }),
+    logBtn: (disabled) => ({ width: '100%', padding: 13, background: disabled ? '#b7eb8f' : '#111', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', marginTop: 12 }),
     logItem: { background: '#fff', border: '0.5px solid #eee', borderRadius: 8, padding: '12px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
     progressBar: { height: 6, background: '#f0f0f0', borderRadius: 3, overflow: 'hidden', marginBottom: 14 },
     streakGrid: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, marginTop: 12 },
@@ -200,13 +272,45 @@ export default function CalAIClone() {
   const streakDays = ['M','T','W','T','F','S','S'];
   const streakActive = [true,true,true,true,true,true,false];
 
+  /* ------------------- VIEW A: AUTHENTICATION INTERFACE ------------------- */
+  if (!user) {
+    return (
+      <div style={s.app}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '16px 20px 40px', fontSize: '12px', fontWeight: '600' }}>
+          <span>9:41</span><span>📶 🪫</span>
+        </div>
+        <div style={{ padding: '0 24px', textAlign: 'center', marginTop: '20px' }}>
+          <h2 style={{ fontSize: '32px', fontWeight: '800', marginBottom: '10px' }}>🥑 Cal AI</h2>
+          <p style={{ color: '#666', fontSize: '14px', marginBottom: '30px' }}>Track your macros instantly with AI</p>
+          
+          <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+            <input type="email" placeholder="Email Address" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} style={s.input} />
+            <input type="password" placeholder="Password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} style={s.input} />
+            <button type="submit" disabled={authLoading} style={{ width: '100%', padding: '14px', background: '#111', color: '#fff', border: 'none', borderRadius: '14px', fontWeight: '700', fontSize: '15px', cursor: 'pointer' }}>
+              {authLoading ? 'Processing...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+          </form>
+
+          <p onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')} style={{ color: '#007aff', fontSize: '13px', marginTop: '20px', cursor: 'pointer', fontWeight: '600' }}>
+            {authMode === 'login' ? "Don't have an account? Sign Up" : 'Already have an account? Log In'}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  /* ------------------- VIEW B: SECURE CORE INTERFACE ------------------- */
   return (
     <div style={s.app}>
       <div style={s.topbar}>
-        <div style={s.topbarTitle}>Cal AI</div>
-        <div style={s.streakBadge}>
-          <span>🔥</span>
-          <span style={s.streakText}>7 day streak</span>
+        <div>
+          <div style={s.topbarTitle}>🥑 Cal AI</div>
+          <span style={{ fontSize: '10px', color: '#888' }}>{user.email}</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={s.streakBadge} onClick={handleLogout}>
+            <span style={s.streakText}>Logout 🚪</span>
+          </div>
         </div>
       </div>
 
@@ -218,6 +322,7 @@ export default function CalAIClone() {
         ))}
       </div>
 
+      {/* DIARY TAB SUBSECTION */}
       {tab === 'diary' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -240,7 +345,9 @@ export default function CalAIClone() {
                   <div key={key} style={s.macroItem}>
                     <div style={{ position: 'relative', width: 64, height: 64, margin: '0 auto 6px' }}>
                       <Ring pct={val / goal} color={color} size="sm" stroke={6} />
-                      <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', fontSize: 11, fontWeight: 500, color }}>{Math.round(val / goal * 100)}%</div>
+                      <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', fontSize: 11, fontWeight: 500, color }}>
+                        {goal > 0 ? Math.round((val / goal) * 100) : 0}%
+                      </div>
                     </div>
                     <div style={{ fontSize: 12, color: '#888' }}>{label}</div>
                     <div style={{ fontSize: 13, fontWeight: 500, color: '#111' }}>{val}g</div>
@@ -251,29 +358,46 @@ export default function CalAIClone() {
           </div>
 
           <input type="file" accept="image/*" onChange={handleImageChange} id="food-upload" style={{ display: 'none' }} />
-          <div style={s.uploadCard} onClick={() => document.getElementById('food-upload').click()}>
-            <div style={{ fontSize: 32, color: '#aaa', marginBottom: 8 }}>📷</div>
-            <p style={{ fontSize: 14, color: '#888' }}>Snap or upload a meal photo</p>
-            <small style={{ fontSize: 12, color: '#bbb' }}>AI will instantly analyze calories and macros</small>
-          </div>
-
-          {imagePreview && <img src={imagePreview} alt="Preview" style={{ width: '100%', maxHeight: 180, objectFit: 'cover', borderRadius: 8, marginBottom: 10 }} />}
+          
+          {!imagePreview ? (
+            <div style={s.uploadCard} onClick={() => document.getElementById('food-upload').click()}>
+              <div style={{ fontSize: 32, color: '#aaa', marginBottom: 8 }}>📸</div>
+              <p style={{ fontSize: 14, color: '#888', margin: '0 0 4px 0' }}>Snap or upload a meal photo</p>
+              <small style={{ fontSize: 12, color: '#bbb' }}>AI will instantly analyze calories and macros</small>
+            </div>
+          ) : (
+            <div style={{ position: 'relative', marginBottom: 12 }}>
+              <img src={imagePreview} alt="Preview" style={{ width: '100%', maxHeight: 180, objectFit: 'cover', borderRadius: 12 }} />
+              {/* Clean absolute contextual layout for the close sign button configuration */}
+              <button onClick={clearSelectedImage} style={{
+                position: 'absolute', top: '10px', right: '10px', width: '30px', height: '30px',
+                borderRadius: '50%', background: 'rgba(0,0,0,0.7)', color: '#fff', border: 'none',
+                fontWeight: 'bold', fontSize: '16px', cursor: 'pointer', display: 'flex',
+                alignItems: 'center', justifyContent: 'center', lineHeight: 1
+              }}>×</button>
+            </div>
+          )}
 
           <button style={s.analyzeBtn(!!base64Data)} onClick={analyzeImage} disabled={loading}>
-            {loading ? '⏳ Analyzing...' : '✨ Analyze with AI'}
+            {loading ? '⏳ Analyzing Elements...' : '✨ Analyze with AI'}
           </button>
 
           <div style={s.card}>
-            <h3 style={{ fontSize: 15, fontWeight: 500, marginBottom: 14 }}>Meal details</h3>
+            <h3 style={{ fontSize: 15, fontWeight: 500, margin: '0 0 14px 0' }}>Meal details</h3>
             <div style={s.field}>
               <label style={s.label}>Meal name</label>
               <input style={s.input} type="text" value={mealData.meal} onChange={e => setMealData({ ...mealData, meal: e.target.value })} placeholder="e.g. Grilled chicken salad" />
             </div>
             <div style={s.grid2}>
-              {[['calories','Calories (kcal)'],['protein','Protein (g)'],['carbs','Carbs (g)'],['fat','Fat (g)']].map(([k, lbl]) => (
+              {[
+                ['calories', 'Calories (kcal)'],
+                ['protein', 'Protein (g)'],
+                ['carbs', 'Carbs (g)'],
+                ['fat', 'Fat (g)']
+              ].map(([k, lbl]) => (
                 <div key={k} style={s.field}>
                   <label style={s.label}>{lbl}</label>
-                  <input style={s.input} type="number" value={mealData[k]} onChange={e => setMealData({ ...mealData, [k]: parseInt(e.target.value) || 0 })} />
+                  <input style={s.input} type="number" value={mealData[k] || ''} onChange={e => setMealData({ ...mealData, [k]: parseInt(e.target.value) || 0 })} />
                 </div>
               ))}
             </div>
@@ -299,6 +423,7 @@ export default function CalAIClone() {
         </div>
       )}
 
+      {/* PROGRESS TAB SUBSECTION */}
       {tab === 'progress' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -313,7 +438,11 @@ export default function CalAIClone() {
               <canvas ref={macroChartRef} role="img" aria-label="Macro donut chart" />
             </div>
             <div style={{ display: 'flex', justifyContent: 'center', gap: 16, fontSize: 12, color: '#888' }}>
-              {[['#A32D2D','Protein'],['#534AB7','Carbs'],['#854F0B','Fat']].map(([c, l]) => (
+              {[
+                ['#A32D2D', 'Protein'],
+                ['#534AB7', 'Carbs'],
+                ['#854F0B', 'Fat']
+              ].map(([c, l]) => (
                 <span key={l} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                   <span style={{ width: 10, height: 10, borderRadius: 2, background: c, display: 'inline-block' }} />
                   {l}
@@ -324,6 +453,7 @@ export default function CalAIClone() {
         </div>
       )}
 
+      {/* GOALS TAB SUBSECTION */}
       {tab === 'goals' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -340,7 +470,7 @@ export default function CalAIClone() {
                   <span style={{ fontSize: 13, fontWeight: 500, color: '#111' }}>{val} / {goal}{unit}</span>
                 </div>
                 <div style={s.progressBar}>
-                  <div style={{ height: '100%', width: Math.min(val/goal*100, 100) + '%', background: color, borderRadius: 3, transition: 'width 0.3s' }} />
+                  <div style={{ height: '100%', width: Math.min((val / goal) * 100, 100) + '%', background: color, borderRadius: 3, transition: 'width 0.3s' }} />
                 </div>
               </div>
             ))}
