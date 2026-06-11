@@ -8,20 +8,13 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 const sanitize = (val) => {
-  if (typeof val !== 'string') return val;
-  return val
-    .replace(/['";\\]/g, '')
-    .replace(/--/g, '')
-    .replace(/\/\*/g, '')
-    .replace(/\*\//g, '')
-    .replace(/\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|UNION|EXEC|CAST|CONVERT|XP_)\b/gi, '')
-    .trim()
-    .slice(0, 200);
+  if (typeof val !== 'string') return String(val ?? '');
+  return val.replace(/<[^>]*>/g, '').replace(/javascript:/gi, '').replace(/on\w+\s*=/gi, '').trim().slice(0, 200);
 };
 
 const sanitizeNumber = (val, min = 0, max = 10000) => {
-  const n = parseInt(val) || 0;
-  return Math.max(min, Math.min(max, n));
+  const n = parseFloat(val) || 0;
+  return Math.max(min, Math.min(max, Math.round(n)));
 };
 
 export default function CalAIClone() {
@@ -40,7 +33,13 @@ export default function CalAIClone() {
   const [mealData, setMealData] = useState({ meal: '', calories: 0, protein: 0, carbs: 0, fat: 0 });
   const [profileSaving, setProfileSaving] = useState(false);
   const [profile, setProfile] = useState({ gender: 'male', age: 25, weight: 70, height: 175, activity: '1.375' });
-
+  const [analyzeError, setAnalyzeError] = useState('');
+  const [chatMessages, setChatMessages] = useState([
+    { role: 'assistant', content: "Hi! I'm your nutrition assistant 🥗 Ask me anything — meal ideas, macro breakdowns, food swaps, or tips based on your diary today." }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef(null);
   const weekChartRef = useRef(null);
   const macroChartRef = useRef(null);
   const weekChartInstance = useRef(null);
@@ -61,6 +60,7 @@ export default function CalAIClone() {
       fat: Math.round((tdee * 0.30) / 9),
     };
   };
+
   const GOALS = getDynamicGoals();
 
   useEffect(() => {
@@ -80,6 +80,12 @@ export default function CalAIClone() {
       return () => clearTimeout(t);
     }
   }, [tab, historyLogs, weeklyData, user]);
+
+  useEffect(() => {
+    if (tab === 'assistant') {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, tab]);
 
   const fetchProfile = async () => {
     if (!user) return;
@@ -150,18 +156,23 @@ export default function CalAIClone() {
 
   const handleLogout = async () => { await supabase.auth.signOut(); setTab('diary'); };
 
-  // ── KEY FIX: wait for FileReader to finish before enabling button ──────────
   const handleImageChange = (e) => {
     const file = e.target.files[0];
     if (!file) return;
     setBase64Ready(false);
     setBase64Data(null);
+    setMealData({ meal: '', calories: 0, protein: 0, carbs: 0, fat: 0 });
+    setAnalyzeError('');
     setImagePreview(URL.createObjectURL(file));
     const reader = new FileReader();
     reader.onloadend = () => {
-      const b64 = reader.result.split(',')[1];
-      setBase64Data(b64);
-      setBase64Ready(true); // only now enable the button
+      const base64 = reader.result.split(',')[1];
+      setBase64Data({ base64, mimeType: file.type || 'image/jpeg' });
+      setBase64Ready(true);
+    };
+    reader.onerror = () => {
+      setAnalyzeError('Failed to read image file. Please try another photo.');
+      setBase64Ready(false);
     };
     reader.readAsDataURL(file);
   };
@@ -170,37 +181,51 @@ export default function CalAIClone() {
     setImagePreview(null);
     setBase64Data(null);
     setBase64Ready(false);
+    setAnalyzeError('');
     setMealData({ meal: '', calories: 0, protein: 0, carbs: 0, fat: 0 });
-    // reset file input so same file can be re-selected
     const inp = document.getElementById('food-upload');
     if (inp) inp.value = '';
   };
 
   const analyzeImage = async () => {
     if (!base64Data || !base64Ready) {
-      alert('Image is still loading, please wait a moment and try again.');
+      setAnalyzeError('Image still loading, please wait a moment.');
       return;
     }
     setLoading(true);
+    setAnalyzeError('');
     try {
       const response = await fetch(`${supabaseUrl}/functions/v1/analyze-food`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${supabaseAnonKey}` },
-        body: JSON.stringify({ imageBase64: base64Data })
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+        },
+        body: JSON.stringify({
+          imageBase64: base64Data.base64,
+          mimeType: base64Data.mimeType,
+        }),
       });
       const responseText = await response.text();
-      if (!response.ok) throw new Error(responseText);
-      const parsed = JSON.parse(responseText);
+      let parsed;
+      try {
+        parsed = JSON.parse(responseText);
+      } catch {
+        throw new Error('Server returned an unexpected response. Check edge function logs.');
+      }
+      if (!response.ok) throw new Error(parsed.error || `Server error ${response.status}`);
       if (parsed.error) throw new Error(parsed.error);
+      if (!parsed.meal && parsed.calories === undefined) throw new Error('AI could not identify the food. Try a clearer or closer photo.');
       setMealData({
-        meal: sanitize(parsed.meal || ''),
+        meal: sanitize(parsed.meal || 'Unknown meal'),
         calories: sanitizeNumber(parsed.calories, 0, 5000),
         protein: sanitizeNumber(parsed.protein, 0, 500),
         carbs: sanitizeNumber(parsed.carbs, 0, 500),
         fat: sanitizeNumber(parsed.fat, 0, 500),
       });
     } catch (err) {
-      alert('Analysis failed: ' + err.message);
+      console.error('analyzeImage error:', err);
+      setAnalyzeError(err.message || 'Analysis failed. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -231,7 +256,78 @@ export default function CalAIClone() {
     else { fetchTodayLogs(); fetchWeeklyData(); }
   };
 
-  const totals = historyLogs.reduce((a, l) => ({ cal: a.cal + l.calories, pro: a.pro + l.protein, carb: a.carb + l.carbs, fat: a.fat + l.fat }), { cal: 0, pro: 0, carb: 0, fat: 0 });
+  const sendChat = async (overrideText) => {
+    const text = (overrideText || chatInput).trim();
+    if (!text || chatLoading) return;
+    setChatInput('');
+
+    const diaryContext = historyLogs.length > 0
+      ? `User's meals logged today: ${historyLogs.map(l => `${l.meal_name} (${l.calories} kcal, P:${l.protein}g C:${l.carbs}g F:${l.fat}g)`).join(', ')}. Totals: ${totals.cal} kcal / ${totals.pro}g protein / ${totals.carb}g carbs / ${totals.fat}g fat. Daily goals: ${GOALS.cal} kcal / ${GOALS.pro}g protein / ${GOALS.carb}g carbs / ${GOALS.fat}g fat. Remaining: ${Math.max(GOALS.cal - totals.cal, 0)} kcal.`
+      : `User has not logged any meals today. Daily goals: ${GOALS.cal} kcal / ${GOALS.pro}g protein / ${GOALS.carb}g carbs / ${GOALS.fat}g fat.`;
+
+    const userMessage = { role: 'user', content: text };
+    const updatedMessages = [...chatMessages, userMessage];
+    setChatMessages(updatedMessages);
+    setChatLoading(true);
+
+    try {
+      // Strip leading assistant messages — OpenRouter requires first message to be "user"
+      const firstUserIdx = updatedMessages.findIndex(m => m.role === 'user');
+      const apiMessages = updatedMessages.slice(firstUserIdx).map(m => ({
+        role: m.role,
+        content: m.content,
+      }));
+
+      const systemPrompt = `You are a friendly, knowledgeable nutrition assistant inside Cal AI, a calorie tracking app. Be concise — max 3 short paragraphs or a short bullet list. Use kcal and grams. ${diaryContext}`;
+
+      // Try scout first (faster), fall back to maverick
+      const modelsToTry = ['meta-llama/llama-4-scout', 'meta-llama/llama-4-maverick'];
+      let reply = null;
+
+      for (const model of modelsToTry) {
+        const res = await fetch(`${supabaseUrl}/functions/v1/swift-endpoint`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseAnonKey}`,
+          },
+          body: JSON.stringify({ systemPrompt, messages: apiMessages, model }),
+        });
+
+        const data = await res.json();
+
+        // Rate limited or overloaded — try next model
+        if (res.status === 429 || res.status === 503) continue;
+        if (data.error) {
+          const errLower = (data.error || '').toLowerCase();
+          if (errLower.includes('429') || errLower.includes('rate') || errLower.includes('limit') || errLower.includes('overload')) continue;
+          throw new Error(data.error);
+        }
+        if (!res.ok) throw new Error(`Server error ${res.status}`);
+
+        reply = data.reply;
+        break;
+      }
+
+      if (!reply) throw new Error('All free models are currently rate limited. Please try again in a moment.');
+      setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+    } catch (err) {
+      console.error('sendChat error:', err);
+      setChatMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `⚠️ ${err.message || "Couldn't reach the AI right now. Please try again in a moment."}`,
+      }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const totals = historyLogs.reduce((a, l) => ({
+    cal: a.cal + l.calories,
+    pro: a.pro + l.protein,
+    carb: a.carb + l.carbs,
+    fat: a.fat + l.fat,
+  }), { cal: 0, pro: 0, carb: 0, fat: 0 });
 
   const renderCharts = () => {
     if (weekChartInstance.current) weekChartInstance.current.destroy();
@@ -261,8 +357,8 @@ export default function CalAIClone() {
   const s = {
     app: { maxWidth: 430, margin: '10px auto', background: '#f5f5f5', minHeight: '92vh', fontFamily: 'system-ui, -apple-system, sans-serif', border: '1px solid #e0e0e0', borderRadius: 40, boxShadow: '0 12px 36px rgba(0,0,0,0.12)', overflowX: 'hidden' },
     topbar: { background: '#fff', padding: '16px 20px 12px', borderBottom: '0.5px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
-    tabs: { display: 'flex', gap: 8, padding: '12px 16px', background: '#f5f5f5' },
-    tab: (a) => ({ flex: 1, padding: '8px 0', textAlign: 'center', fontSize: 13, fontWeight: 500, borderRadius: 8, border: '0.5px solid #ddd', cursor: 'pointer', background: a ? '#111' : '#fff', color: a ? '#fff' : '#666' }),
+    tabs: { display: 'flex', gap: 6, padding: '10px 12px', background: '#f5f5f5' },
+    tab: (a) => ({ flex: 1, padding: '7px 0', textAlign: 'center', fontSize: 12, fontWeight: 500, borderRadius: 8, border: '0.5px solid #ddd', cursor: 'pointer', background: a ? '#111' : '#fff', color: a ? '#fff' : '#666' }),
     section: { padding: '0 16px' },
     card: { background: '#fff', borderRadius: 12, border: '0.5px solid #eee', padding: 16, marginBottom: 12 },
     field: { marginBottom: 12 },
@@ -272,6 +368,7 @@ export default function CalAIClone() {
     grid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
     pbar: { height: 6, background: '#f0f0f0', borderRadius: 3, overflow: 'hidden', marginBottom: 14 },
     sgrid: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, marginTop: 12 },
+    errorBox: { background: '#fff2f0', border: '1px solid #ffccc7', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#cf1322', marginBottom: 12 },
   };
 
   const Ring = ({ pct, color, size, stroke }) => {
@@ -295,6 +392,14 @@ export default function CalAIClone() {
     const d = new Date(); d.setDate(d.getDate() - i);
     streakDays.push({ label: d.toLocaleDateString('en', { weekday: 'narrow' }), hasLog: weeklyData[6 - i] > 0, isToday: i === 0 });
   }
+
+  const quickPrompts = [
+    "What should I eat for the rest of today?",
+    "How much protein is in a boiled egg?",
+    "Suggest a high-protein desi meal under 500 kcal",
+    "Am I hitting my macros today?",
+    "Give me a healthy snack under 200 kcal",
+  ];
 
   if (!user) {
     return (
@@ -328,13 +433,17 @@ export default function CalAIClone() {
       </div>
 
       <div style={s.tabs}>
-        {['diary', 'progress', 'goals'].map(t => (
-          <div key={t} style={s.tab(tab === t)} onClick={() => setTab(t)}>
-            {t.charAt(0).toUpperCase() + t.slice(1)}
-          </div>
+        {[
+          { key: 'diary',     label: '📓 Diary'     },
+          { key: 'progress',  label: '📊 Progress'  },
+          { key: 'assistant', label: '🤖 AI Chat'   },
+          { key: 'goals',     label: '🎯 Goals'     },
+        ].map(({ key, label }) => (
+          <div key={key} style={s.tab(tab === key)} onClick={() => setTab(key)}>{label}</div>
         ))}
       </div>
 
+      {/* ════ DIARY TAB ════ */}
       {tab === 'diary' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -368,14 +477,14 @@ export default function CalAIClone() {
             </div>
           </div>
 
-          <input type="file" accept="image/*" onChange={handleImageChange} id="food-upload" style={{ display: 'none' }} />
+          <input type="file" accept="image/*" capture="environment" onChange={handleImageChange} id="food-upload" style={{ display: 'none' }} />
 
           {!imagePreview ? (
             <div style={{ border: '1px dashed #ccc', background: '#fafafa', borderRadius: 12, padding: 20, textAlign: 'center', cursor: 'pointer', marginBottom: 12 }}
               onClick={() => document.getElementById('food-upload').click()}>
               <div style={{ fontSize: 32, color: '#aaa', marginBottom: 8 }}>📸</div>
               <p style={{ fontSize: 14, color: '#888', margin: '0 0 4px' }}>Snap or upload a meal photo</p>
-              <small style={{ fontSize: 12, color: '#bbb' }}>AI will instantly analyze calories and macros</small>
+              <small style={{ fontSize: 12, color: '#bbb' }}>AI recognizes all foods including biryani, desi meals & more</small>
             </div>
           ) : (
             <div style={{ position: 'relative', marginBottom: 12 }}>
@@ -384,12 +493,11 @@ export default function CalAIClone() {
             </div>
           )}
 
+          {analyzeError && <div style={s.errorBox}>⚠️ {analyzeError}</div>}
+
           {imagePreview && (
-            <button
-              onClick={analyzeImage}
-              disabled={loading || !base64Ready}
-              style={{ width: '100%', padding: 13, background: loading ? '#aaa' : !base64Ready ? '#ccc' : '#52c41a', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 700, cursor: loading || !base64Ready ? 'not-allowed' : 'pointer', marginBottom: 12 }}
-            >
+            <button onClick={analyzeImage} disabled={loading || !base64Ready}
+              style={{ width: '100%', padding: 13, background: loading ? '#aaa' : !base64Ready ? '#ccc' : '#52c41a', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 700, cursor: loading || !base64Ready ? 'not-allowed' : 'pointer', marginBottom: 12 }}>
               {loading ? '⏳ Analyzing...' : !base64Ready ? '⏳ Loading image...' : '✨ Analyze with AI'}
             </button>
           )}
@@ -398,13 +506,15 @@ export default function CalAIClone() {
             <h3 style={{ fontSize: 15, fontWeight: 500, margin: '0 0 14px' }}>Meal details</h3>
             <div style={s.field}>
               <label style={s.lbl}>Meal name</label>
-              <input style={s.inp} type="text" value={mealData.meal} onChange={e => setMealData({ ...mealData, meal: e.target.value })} placeholder="e.g. Grilled chicken salad" maxLength={200} />
+              <input style={s.inp} type="text" value={mealData.meal} onChange={e => setMealData({ ...mealData, meal: e.target.value })} placeholder="e.g. Chicken Biryani" maxLength={200} />
             </div>
             <div style={s.grid2}>
               {[['calories','Calories (kcal)'],['protein','Protein (g)'],['carbs','Carbs (g)'],['fat','Fat (g)']].map(([k, lbl]) => (
                 <div key={k} style={s.field}>
                   <label style={s.lbl}>{lbl}</label>
-                  <input style={s.inp} type="number" min="0" max={k === 'calories' ? 5000 : 500} value={mealData[k] || ''} onChange={e => setMealData({ ...mealData, [k]: parseInt(e.target.value) || 0 })} />
+                  <input style={s.inp} type="number" min="0" max={k === 'calories' ? 5000 : 500}
+                    value={mealData[k] || ''}
+                    onChange={e => setMealData({ ...mealData, [k]: parseInt(e.target.value) || 0 })} />
                 </div>
               ))}
             </div>
@@ -434,6 +544,7 @@ export default function CalAIClone() {
         </div>
       )}
 
+      {/* ════ PROGRESS TAB ════ */}
       {tab === 'progress' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -458,6 +569,71 @@ export default function CalAIClone() {
         </div>
       )}
 
+      {/* ════ AI ASSISTANT TAB ════ */}
+      {tab === 'assistant' && (
+        <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(92vh - 130px)' }}>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {chatMessages.map((msg, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                <div style={{
+                  maxWidth: '82%', padding: '10px 14px',
+                  borderRadius: msg.role === 'user' ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
+                  background: msg.role === 'user' ? '#111' : '#fff',
+                  color: msg.role === 'user' ? '#fff' : '#111',
+                  fontSize: 14, lineHeight: 1.5,
+                  border: msg.role === 'assistant' ? '0.5px solid #eee' : 'none',
+                  whiteSpace: 'pre-wrap',
+                }}>
+                  {msg.role === 'assistant' && <span style={{ fontSize: 11, color: '#aaa', display: 'block', marginBottom: 4 }}>🤖 AI Assistant</span>}
+                  {msg.content}
+                </div>
+              </div>
+            ))}
+            {chatLoading && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                <div style={{ background: '#fff', border: '0.5px solid #eee', borderRadius: '18px 18px 18px 4px', padding: '10px 16px', fontSize: 20 }}>
+                  <span style={{ animation: 'pulse 1s infinite' }}>●</span>
+                  <span style={{ animation: 'pulse 1s infinite 0.2s', margin: '0 4px' }}>●</span>
+                  <span style={{ animation: 'pulse 1s infinite 0.4s' }}>●</span>
+                  <style>{`@keyframes pulse { 0%,100%{opacity:.2} 50%{opacity:1} }`}</style>
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {chatMessages.length <= 1 && (
+            <div style={{ padding: '0 16px 8px', display: 'flex', gap: 6, overflowX: 'auto', scrollbarWidth: 'none' }}>
+              {quickPrompts.map((qp, i) => (
+                <button key={i} onClick={() => sendChat(qp)}
+                  style={{ flexShrink: 0, padding: '7px 12px', background: '#fff', border: '0.5px solid #ddd', borderRadius: 20, fontSize: 12, color: '#555', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                  {qp}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div style={{ padding: '10px 16px 16px', background: '#f5f5f5', borderTop: '0.5px solid #eee', display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              placeholder="Ask anything about nutrition..."
+              value={chatInput}
+              onChange={e => setChatInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendChat()}
+              style={{ ...s.inp, flex: 1, margin: 0 }}
+              disabled={chatLoading}
+            />
+            <button
+              onClick={() => sendChat()}
+              disabled={!chatInput.trim() || chatLoading}
+              style={{ padding: '9px 16px', background: chatInput.trim() && !chatLoading ? '#111' : '#ccc', color: '#fff', border: 'none', borderRadius: 8, fontSize: 18, cursor: chatInput.trim() && !chatLoading ? 'pointer' : 'not-allowed' }}>
+              ↑
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ════ GOALS TAB ════ */}
       {tab === 'goals' && (
         <div style={s.section}>
           <div style={s.card}>
@@ -476,58 +652,46 @@ export default function CalAIClone() {
                 <input style={s.inp} type="number" min="1" max="120" value={profile.age} onChange={e => setProfile({ ...profile, age: parseInt(e.target.value) || 0 })} />
               </div>
               <div style={s.field}>
-                <label style={s.lbl}>Height (cm)</label>
-                <input style={s.inp} type="number" min="50" max="300" value={profile.height} onChange={e => setProfile({ ...profile, height: parseInt(e.target.value) || 0 })} />
+                <label style={s.lbl}>Weight (kg)</label>
+                <input style={s.inp} type="number" min="1" max="500" value={profile.weight} onChange={e => setProfile({ ...profile, weight: parseInt(e.target.value) || 0 })} />
               </div>
             </div>
             <div style={s.grid2}>
               <div style={s.field}>
-                <label style={s.lbl}>Weight (kg)</label>
-                <input style={s.inp} type="number" min="1" max="500" value={profile.weight} onChange={e => setProfile({ ...profile, weight: parseInt(e.target.value) || 0 })} />
+                <label style={s.lbl}>Height (cm)</label>
+                <input style={s.inp} type="number" min="50" max="300" value={profile.height} onChange={e => setProfile({ ...profile, height: parseInt(e.target.value) || 0 })} />
               </div>
               <div style={s.field}>
                 <label style={s.lbl}>Activity Level</label>
                 <select style={s.sel} value={profile.activity} onChange={e => setProfile({ ...profile, activity: e.target.value })}>
-                  <option value="1.2">Sedentary</option>
-                  <option value="1.375">Lightly Active</option>
-                  <option value="1.55">Moderately Active</option>
-                  <option value="1.725">Very Active</option>
+                  <option value="1.2">Sedentary (Office job)</option>
+                  <option value="1.375">Lightly Active (1-3 days/wk)</option>
+                  <option value="1.55">Moderately Active (3-5 days/wk)</option>
+                  <option value="1.725">Very Active (6-7 days/wk)</option>
                 </select>
               </div>
             </div>
             <button onClick={saveProfile} disabled={profileSaving}
-              style={{ width: '100%', padding: 13, background: profileSaving ? '#b7eb8f' : '#111', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 600, cursor: 'pointer' }}>
-              {profileSaving ? 'Saving...' : '💾 Save Profile to All Devices'}
+              style={{ width: '100%', padding: 13, background: profileSaving ? '#ccc' : '#111', color: '#fff', border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 600, cursor: profileSaving ? 'not-allowed' : 'pointer', marginTop: 8 }}>
+              {profileSaving ? 'Saving parameters...' : '💾 Sync and Calculate Target Goals'}
             </button>
           </div>
 
-          <div style={s.card}>
-            <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 14, color: '#111' }}>Calculated Targets (BMR)</div>
-            {[
-              { label: 'Calories', val: totals.cal, goal: GOALS.cal, unit: 'kcal', color: '#639922' },
-              { label: 'Protein', val: totals.pro, goal: GOALS.pro, unit: 'g', color: '#A32D2D' },
-              { label: 'Carbs', val: totals.carb, goal: GOALS.carb, unit: 'g', color: '#534AB7' },
-              { label: 'Fat', val: totals.fat, goal: GOALS.fat, unit: 'g', color: '#854F0B' },
-            ].map(({ label, val, goal, unit, color }) => (
-              <div key={label}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <span style={{ fontSize: 13, color: '#888' }}>{label}</span>
-                  <span style={{ fontSize: 13, fontWeight: 500, color: '#111' }}>{val} / {goal}{unit}</span>
-                </div>
-                <div style={s.pbar}>
-                  <div style={{ height: '100%', width: Math.min((val / goal) * 100, 100) + '%', background: color, borderRadius: 3, transition: 'width 0.3s' }} />
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div style={s.card}>
-            <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 4, color: '#111' }}>Streak tracker</div>
-            <div style={{ fontSize: 12, color: '#aaa', marginBottom: 8 }}>Green = logged meals that day</div>
-            <div style={s.sgrid}>
-              {streakDays.map((d, i) => (
-                <div key={i} style={{ aspectRatio: '1', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 500, background: d.isToday ? '#fff' : d.hasLog ? '#3B6D11' : '#f0f0f0', color: d.isToday ? '#3B6D11' : d.hasLog ? '#EAF3DE' : '#aaa', border: d.isToday ? '1.5px solid #3B6D11' : 'none' }}>
-                  {d.label}
+          <div style={{ ...s.card, background: '#fcfbfa', border: '1px solid #eadeca' }}>
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: '0 0 10px', color: '#854F0B' }}>🎯 Calculated TDEE Macro Strategy</h3>
+            <p style={{ fontSize: 12, color: '#666', lineHeight: 1.4, margin: '0 0 14px' }}>
+              These daily recommendations are calculated using the Mifflin-St Jeor formula based on your metadata and configured with a clean 30% Protein / 40% Carbs / 30% Fat balanced split.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              {[
+                { label: 'Target Calories', val: `${GOALS.cal} kcal`, color: '#639922' },
+                { label: 'Target Protein',  val: `${GOALS.pro}g`,    color: '#A32D2D' },
+                { label: 'Target Carbs',    val: `${GOALS.carb}g`,   color: '#534AB7' },
+                { label: 'Target Fats',     val: `${GOALS.fat}g`,    color: '#854F0B' },
+              ].map(({ label, val, color }) => (
+                <div key={label} style={{ background: '#fff', padding: 10, borderRadius: 8, border: '0.5px solid #eee' }}>
+                  <span style={{ fontSize: 11, color: '#888', display: 'block' }}>{label}</span>
+                  <strong style={{ fontSize: 18, color }}>{val}</strong>
                 </div>
               ))}
             </div>
